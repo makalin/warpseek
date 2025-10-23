@@ -1,0 +1,55 @@
+[package]
+name = "warpseek"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mehmet"]
+description = "Blazing-fast terminal search: instant filename fuzzy + full-text across your folders."
+license = "MIT"
+repository = "https://github.com/makalin/warpseek"
+
+[[bin]]
+name = "warpseek"
+path = "src/main.rs"
+
+[[bin]]
+name = "ws"
+path = "src/main.rs"
+
+[[bin]]
+name = "warpseek-gui"
+path = "src/gui_simple.rs"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+debug = false
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+directories = "5.0"
+ignore = "0.4"
+notify = "6.1"
+rayon = "1.10"
+indicatif = "0.17"
+walkdir = "2.5"
+memchr = "2.7"
+bstr = "1.9"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+time = { version = "0.3", features = ["formatting", "macros"] }
+# search
+tantivy = "0.22"
+fst = "0.4"
+# fs metadata, hashing
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+# GUI dependencies
+tauri = { version = "1.5", features = ["dialog-open", "dialog-save", "fs-all", "os-all", "path-all", "shell-open"] }
+tauri-build = "1.5"
+regex = "1.10"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+[build-dependencies]
+tauri-build = "1.5"
