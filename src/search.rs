@@ -112,6 +112,8 @@ pub fn collect_files(roots: &[PathBuf]) -> Vec<PathBuf> {
             }
         }
     }
+    // Sort files lexicographically for FST compatibility
+    v.sort();
     v
 }
 

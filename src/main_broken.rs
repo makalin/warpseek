@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use std::{fs, path::PathBuf};
+use tantivy::{ReloadPolicy, collector::TopDocs, query::QueryParser};
+use fst::{Set, Streamer};
 
 use warpseek::search::*;
 
@@ -44,6 +46,56 @@ fn index_path(cli: &Cli) -> Result<PathBuf> {
     })
 }
 
+fn do_query(cli: &Cli, q: &str, top: usize, names_only: bool) -> Result<()> {
+    let index_dir = index_path(cli)?;
+    let (index, fields) = open_index(&index_dir)?;
+    let reader = index.reader_builder().reload_policy(ReloadPolicy::Manual).try_into()?;
+    let searcher = reader.searcher();
+
+    if names_only {
+        // filename-only search via QueryParser on 'name'
+        let qp = QueryParser::for_index(&index, vec![fields.name]);
+        let query = qp.parse_query(q)?;
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(top))?;
+        for (_score, docaddr) in top_docs {
+            let doc = searcher.doc(docaddr)?;
+            let path = doc.get_first(fields.path).and_then(|v| v.text()).unwrap_or("");
+            println!("{}", path);
+        }
+        return Ok(());
+    }
+
+    let qp = QueryParser::for_index(&index, vec![fields.content, fields.name]);
+    let query = qp.parse_query(q)?;
+    let top_docs = searcher.search(&query, &TopDocs::with_limit(top))?;
+    for (_score, docaddr) in top_docs {
+        let doc = searcher.doc(docaddr)?;
+        let path = doc.get_first(fields.path).and_then(|v| v.text()).unwrap_or("");
+        println!("{}", path);
+    }
+    Ok(())
+}
+
+fn do_fuzzy(cli: &Cli, pat: &str, top: usize) -> Result<()> {
+    let index_dir = index_path(cli)?;
+    let fst_path = index_dir.join("names.fst");
+    let bytes = fs::read(fst_path)?;
+    let set = Set::new(bytes)?;
+    // simple substring case-insensitive by scanning all terms; fst isn't ideal for substrings, but works
+    let mut results = Vec::new();
+    let q = pat.to_lowercase();
+    let mut stream = set.stream();
+    while let Some(b) = stream.next() {
+        let s = std::str::from_utf8(b).unwrap_or("");
+        if s.to_lowercase().contains(&q) {
+            results.push(s.to_string());
+            if results.len() >= top { break; }
+        }
+    }
+    for r in results { println!("{}", r); }
+    Ok(())
+}
+
 fn ensure_index(cli: &Cli) -> Result<()> {
     let p = index_path(cli)?;
     fs::create_dir_all(&p)?;
@@ -57,39 +109,13 @@ fn main() -> Result<()> {
 
     match &cli.command {
         Commands::Init { roots } => {
-            println!("🚀 Initializing WarpSeek index...");
-            println!("📁 Adding roots: {:?}", roots);
-            
-            // Verify roots exist
-            for root in roots {
-                if !root.exists() {
-                    return Err(anyhow!("Path does not exist: {}", root.display()));
-                }
-                if !root.is_dir() {
-                    return Err(anyhow!("Path is not a directory: {}", root.display()));
-                }
-            }
-            
+            println!("Initializing index with roots: {:?}", roots);
             cfg.roots = roots.clone();
             write_config(&cfg)?;
-            
-            println!("📝 Configuration saved");
-            println!("🔍 Building index (this may take a while for large directories)...");
-            
-            match index_all(&mut cfg) {
-                Ok(_) => {
-                    println!("✅ Index created successfully!");
-                    println!("🎯 You can now search with: warpseek q \"your query\"");
-                    println!("🔍 Or fuzzy search filenames with: warpseek f \"pattern\"");
-                }
-                Err(e) => {
-                    println!("❌ Error building index: {}", e);
-                    return Err(e);
-                }
-            }
+            index_all(&mut cfg)?;
+            println!("✅ Index created successfully!");
         }
         Commands::Add { paths } => {
-            println!("➕ Adding paths to index...");
             for p in paths { 
                 if !cfg.roots.contains(p) { 
                     cfg.roots.push(p.clone()); 
@@ -100,58 +126,34 @@ fn main() -> Result<()> {
             println!("✅ Added paths and rebuilt index!");
         }
         Commands::Remove { paths } => {
-            println!("➖ Removing paths from config...");
             cfg.roots.retain(|r| !paths.contains(r));
             write_config(&cfg)?;
             println!("✅ Removed paths from config!");
         }
         Commands::Index => { 
-            println!("🔄 Rebuilding index...");
             index_all(&mut cfg)?; 
             println!("✅ Index rebuilt successfully!");
         }
         Commands::Q { query, top, names_only } => { 
-            println!("🔍 Searching for: \"{}\"", query);
-            println!("📊 Max results: {}", top);
-            if *names_only {
-                println!("📝 Names only: true");
-            }
-            println!("⚠️  Query functionality not yet implemented - use the desktop GUI for now");
+            do_query(&cli, query, *top, *names_only)?; 
         }
         Commands::F { pattern, top } => { 
-            println!("🔍 Fuzzy searching for: \"{}\"", pattern);
-            println!("📊 Max results: {}", top);
-            println!("⚠️  Fuzzy search functionality not yet implemented - use the desktop GUI for now");
+            do_fuzzy(&cli, pattern, *top)?; 
         }
         Commands::Stats => {
             let index_dir = index_path(&cli)?;
+            let (index, _) = open_index(&index_dir)?;
+            let reader = index.reader()?;
             println!("📊 WarpSeek Statistics:");
-            println!("  📁 Index directory: {}", index_dir.display());
-            println!("  📂 Configured roots: {}", cfg.roots.len());
-            for (i, root) in cfg.roots.iter().enumerate() {
-                println!("    {}. {}", i + 1, root.display());
-            }
-            if index_dir.exists() {
-                println!("  ✅ Index exists");
-                // Try to get basic stats
-                match open_index(&index_dir) {
-                    Ok((index, _)) => {
-                        let reader = index.reader()?;
-                        println!("  📊 Segments: {}", reader.searcher().segment_readers().len());
-                    }
-                    Err(_) => {
-                        println!("  ⚠️  Index exists but may be corrupted");
-                    }
-                }
-            } else {
-                println!("  ❌ No index found - run 'warpseek init <paths>' first");
-            }
+            println!("  Segments: {}", reader.searcher().segment_readers().len());
+            println!("  Index dir: {}", index_dir.to_string_lossy());
+            println!("  Roots: {:?}", cfg.roots);
         }
         Commands::Purge => {
             let p = index_path(&cli)?;
             if p.exists() { 
                 fs::remove_dir_all(&p)?; 
-                println!("✅ Purged index at: {}", p.display());
+                println!("✅ Purged index at: {}", p.to_string_lossy());
             } else {
                 println!("ℹ️  No index found to purge");
             }
